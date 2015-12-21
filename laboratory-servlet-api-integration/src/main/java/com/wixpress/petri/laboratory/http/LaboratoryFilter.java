@@ -1,5 +1,9 @@
 package com.wixpress.petri.laboratory.http;
 
+import com.wixpress.framework.cache.RemoteDataSource;
+import com.wixpress.framework.cache.registry.MapBasedRemoteDataFetcherRegistry;
+import com.wixpress.framework.cache.spec.SpecFactory;
+import com.wixpress.framework.cache.spec.TransientCacheSpec;
 import com.wixpress.petri.PetriRPCClient;
 import com.wixpress.petri.experiments.domain.FilterTypeIdResolver;
 import com.wixpress.petri.laboratory.*;
@@ -17,6 +21,8 @@ import java.net.MalformedURLException;
 import java.util.Properties;
 import java.util.concurrent.Executors;
 
+import static com.wixpress.petri.experiments.jackson.ObjectMapperFactory.makeObjectMapper;
+
 /**
  * Created with IntelliJ IDEA.
  * User: sagyr
@@ -30,7 +36,8 @@ public class LaboratoryFilter implements Filter {
     public static final String PETRI_LABORATORY = "petri_laboratory";
     private final PetriProperties petriProperties = new PetriProperties();
 
-    private  ServerMetricsReporter metricsReporter ;
+    private TransientCacheSpec<ConductibleExperiments> experimentsTransientCacheSpec;
+    private ServerMetricsReporter metricsReporter ;
     private PetriClient petriClient;
     private UserRequestPetriClient userRequestPetriClient;
     private PetriTopology petriTopology;
@@ -78,7 +85,7 @@ public class LaboratoryFilter implements Filter {
 
 
     private Laboratory laboratory(UserInfoStorage storage) throws MalformedURLException {
-        Experiments experiments = new CachedExperiments(new PetriClientExperimentSource(petriClient));
+        Experiments experiments = new CachedExperiments(new TransientCacheExperimentSource(experimentsTransientCacheSpec.getReadOnlyTransientCache()));
         TestGroupAssignmentTracker tracker = new BILoggingTestGroupAssignmentTracker(new JodaTimeClock());
         ErrorHandler errorHandler = new ErrorHandler() {
             @Override
@@ -99,6 +106,7 @@ public class LaboratoryFilter implements Filter {
 
     public void destroy() {
         metricsReporter.stopScheduler();
+        experimentsTransientCacheSpec.stop();
     }
 
     public void init(FilterConfig filterConfig) throws ServletException {
@@ -111,9 +119,26 @@ public class LaboratoryFilter implements Filter {
             e.printStackTrace();
         }
 
+        MySpecFactory mySpecFactory = new MySpecFactory(
+                new NopCollaboratorRegistrar(), new MapBasedRemoteDataFetcherRegistry(),
+                makeObjectMapper(),
+                System.getProperty("java.io.tmpdir")+"gollum/cache/");
+
+        experimentsTransientCacheSpec = mySpecFactory.aSpec(ConductibleExperiments.class, new PetriClientRemoteDataSource());
+        experimentsTransientCacheSpec.startRDF();
+
         startMetricsReporterScheduler(petriTopology.getReportsScheduleTimeInMillis());
 
         FilterTypeIdResolver.useDynamicFilterClassLoading();
+    }
+
+
+
+    private class PetriClientRemoteDataSource implements RemoteDataSource<ConductibleExperiments> {
+        @Override
+        public ConductibleExperiments fetch() throws IOException {
+            return new ConductibleExperiments(petriClient.fetchActiveExperiments());
+        }
     }
 
     private void readProperties(FilterConfig filterConfig) {
